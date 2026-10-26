@@ -5,10 +5,15 @@ import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
+import android.view.ViewConfiguration
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.google.gson.JsonObject
+import com.remotecontrol.input.GestureQueue
 
 /**
  * AccessibilityService that receives remote touch events and
@@ -17,6 +22,31 @@ import com.google.gson.JsonObject
  * Supports: tap, swipe, long press, pinch, back, home, recents
  */
 class InputInjectionService : AccessibilityService() {
+    private val gestureHandler = Handler(Looper.getMainLooper())
+    private val gestureQueue = GestureQueue<GestureDescription>(SystemClock::uptimeMillis) { gesture, done ->
+        val started = SystemClock.uptimeMillis()
+        val callback = object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription) {
+                Log.d(TAG, "Remote gesture completed in ${SystemClock.uptimeMillis() - started}ms")
+                done()
+            }
+            override fun onCancelled(gestureDescription: GestureDescription) {
+                Log.d(TAG, "Remote gesture cancelled")
+                done()
+            }
+        }
+        try {
+            if (!dispatchGesture(gesture, callback, gestureHandler)) {
+                Log.w(TAG, "Remote gesture rejected")
+                done()
+            } else {
+                Log.d(TAG, "Remote gesture started, duration=${gesture.getStroke(0).duration}ms")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Remote gesture dispatch failed", e)
+            done()
+        }
+    }
     private var consentAssistant: ScreenConsentAssistant? = null
 
     companion object {
@@ -44,11 +74,13 @@ class InputInjectionService : AccessibilityService() {
 
     override fun onInterrupt() {
         cancelScreenConsent()
+        clearPendingGestures()
         Log.d(TAG, "Accessibility service interrupted")
     }
 
     override fun onDestroy() {
         cancelScreenConsent()
+        clearPendingGestures()
         consentAssistant = null
         super.onDestroy()
         instance = null
@@ -65,6 +97,8 @@ class InputInjectionService : AccessibilityService() {
      *   "screenWidth": int,         // remote screen dimensions for coordinate mapping
      *   "screenHeight": int }
      */
+    fun clearPendingGestures() { gestureQueue.clear() }
+
     fun dispatchRemoteEvent(event: JsonObject) {
         val action = event.get("action")?.asString ?: return
 
@@ -101,27 +135,34 @@ class InputInjectionService : AccessibilityService() {
                 val text = event.get("text")?.asString ?: return
                 performTypeText(text)
             }
-            "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
-            "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
-            "recents" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
-            "notifications" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
-            "quick_settings" -> performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
+            "back" -> performNavigation(GLOBAL_ACTION_BACK)
+            "home" -> performNavigation(GLOBAL_ACTION_HOME)
+            "recents" -> performNavigation(GLOBAL_ACTION_RECENTS)
+            "notifications" -> performNavigation(GLOBAL_ACTION_NOTIFICATIONS)
+            "quick_settings" -> performNavigation(GLOBAL_ACTION_QUICK_SETTINGS)
             else -> Log.w(TAG, "Unknown action: $action")
         }
     }
 
+    private fun performNavigation(action: Int) {
+        clearPendingGestures()
+        performGlobalAction(action)
+    }
+
     private fun performTap(x: Float, y: Float) {
         val path = Path().apply { moveTo(x, y) }
-        val stroke = GestureDescription.StrokeDescription(path, 0, 100)
+        val stroke = GestureDescription.StrokeDescription(path, 0, 40)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        dispatchGesture(gesture, null, null)
+        gestureQueue.submit(gesture)
     }
 
     private fun performLongPress(x: Float, y: Float, duration: Long) {
         val path = Path().apply { moveTo(x, y) }
-        val stroke = GestureDescription.StrokeDescription(path, 0, duration)
+        // Give the system time to recognize the hold, including customized accessibility timeouts.
+        val minimum = ViewConfiguration.getLongPressTimeout().toLong() + 80L
+        val stroke = GestureDescription.StrokeDescription(path, 0, duration.coerceIn(minimum, maxOf(minimum, 1000L)))
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        dispatchGesture(gesture, null, null)
+        gestureQueue.submit(gesture)
     }
 
     private fun performSwipe(x1: Float, y1: Float, x2: Float, y2: Float, duration: Long) {
@@ -129,9 +170,9 @@ class InputInjectionService : AccessibilityService() {
             moveTo(x1, y1)
             lineTo(x2, y2)
         }
-        val stroke = GestureDescription.StrokeDescription(path, 0, duration)
+        val stroke = GestureDescription.StrokeDescription(path, 0, duration.coerceIn(80L, 250L))
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        dispatchGesture(gesture, null, null)
+        gestureQueue.submit(gesture)
     }
 
     private fun performPinch(centerX: Float, centerY: Float, scale: Float) {
@@ -164,7 +205,7 @@ class InputInjectionService : AccessibilityService() {
             builder.addStroke(GestureDescription.StrokeDescription(path2, 0, 500))
         }
 
-        dispatchGesture(builder.build(), null, null)
+        gestureQueue.submit(builder.build())
     }
 
     /**

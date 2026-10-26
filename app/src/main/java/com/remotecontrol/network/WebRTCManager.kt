@@ -8,6 +8,7 @@ import android.util.Log
 import android.view.WindowManager
 import com.google.gson.JsonObject
 import com.remotecontrol.config.ServerConfigStore
+import com.remotecontrol.config.VideoStreamProfile
 import org.webrtc.*
 
 /**
@@ -24,20 +25,12 @@ class WebRTCManager(
     companion object {
         private const val TAG = "WebRTCManager"
 
-        // Bitrate limits for quality/bandwidth balance
-        private const val MAX_BITRATE_BPS = 2_500_000  // 2.5 Mbps
-        private const val MIN_BITRATE_BPS = 500_000    // 500 Kbps
-        private const val START_BITRATE_BPS = 1_500_000 // 1.5 Mbps
-
-        // Capture settings
-        private const val CAPTURE_FPS = 30
-        private const val RESOLUTION_SCALE = 0.75
-
     }
 
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
     private var videoCapturer: VideoCapturer? = null
+    private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var localVideoSource: VideoSource? = null
     private var localVideoTrack: VideoTrack? = null
     private var eglBase: EglBase? = null
@@ -89,19 +82,23 @@ class WebRTCManager(
         })
         videoCapturer = screenCapturer
 
-        val surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase!!.eglBaseContext)
+        val captureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase!!.eglBaseContext)
+        surfaceTextureHelper = captureHelper
         localVideoSource = peerConnectionFactory!!.createVideoSource(screenCapturer.isScreencast)
-        screenCapturer.initialize(surfaceTextureHelper, context, localVideoSource!!.capturerObserver)
+        screenCapturer.initialize(captureHelper, context, localVideoSource!!.capturerObserver)
 
-        // Capture at scaled resolution for bandwidth efficiency
-        val captureWidth = (width * RESOLUTION_SCALE).toInt()
-        val captureHeight = (height * RESOLUTION_SCALE).toInt()
-        screenCapturer.startCapture(captureWidth, captureHeight, CAPTURE_FPS)
+        val size = VideoStreamProfile.captureSize(width, height)
+        // ScreenCapturerAndroid explicitly ignores startCapture's framerate argument.
+        // Adapt the source before starting, so excess display frames never reach the encoder.
+        localVideoSource!!.adaptOutputFormat(size.width, size.height, VideoStreamProfile.FPS)
+        screenCapturer.startCapture(size.width, size.height, VideoStreamProfile.FPS)
+        Log.d(TAG, "Capture configured: ${size.width}x${size.height}, source cap=${VideoStreamProfile.FPS}fps")
 
         localVideoTrack = peerConnectionFactory!!.createVideoTrack("screen_track", localVideoSource)
         localVideoTrack?.setEnabled(true)
 
         peerConnection?.addTrack(localVideoTrack, listOf("screen_stream"))
+        applyBitrateLimit()
 
         // Create offer
         val constraints = MediaConstraints().apply {
@@ -191,10 +188,14 @@ class WebRTCManager(
             if (sender.track()?.kind() == "video") {
                 val params = sender.parameters
                 if (params.encodings.isNotEmpty()) {
-                    params.encodings[0].maxBitrateBps = MAX_BITRATE_BPS
-                    params.encodings[0].minBitrateBps = MIN_BITRATE_BPS
-                    sender.parameters = params
-                    Log.d(TAG, "Bitrate limit applied: $MIN_BITRATE_BPS - $MAX_BITRATE_BPS bps")
+                    params.encodings.forEach {
+                        it.maxBitrateBps = VideoStreamProfile.MAX_BITRATE_BPS
+                        it.minBitrateBps = VideoStreamProfile.MIN_BITRATE_BPS
+                        it.maxFramerate = VideoStreamProfile.FPS
+                    }
+                    params.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+                    val applied = sender.setParameters(params)
+                    Log.d(TAG, "Video limits applied=$applied: ${VideoStreamProfile.MIN_BITRATE_BPS}-${VideoStreamProfile.MAX_BITRATE_BPS}bps, ${VideoStreamProfile.FPS}fps")
                 }
             }
         }
@@ -235,7 +236,7 @@ class WebRTCManager(
         }
 
         // Add bitrate constraint
-        val bitrateLine = "b=AS:${MAX_BITRATE_BPS / 1000}"
+        val bitrateLine = "b=AS:${VideoStreamProfile.MAX_BITRATE_BPS / 1000}"
         if (lines.none { it.startsWith("b=AS:") }) {
             lines.add(mLineIndex + 1, bitrateLine)
         }
@@ -312,6 +313,7 @@ class WebRTCManager(
     fun release() {
         try { videoCapturer?.stopCapture() } catch (e: Exception) { Log.e(TAG, "stopCapture error", e) }
         try { videoCapturer?.dispose() } catch (e: Exception) { Log.e(TAG, "dispose capturer error", e) }
+        try { surfaceTextureHelper?.dispose() } catch (e: Exception) { Log.e(TAG, "dispose capture helper error", e) }
         try { localVideoTrack?.dispose() } catch (e: Exception) { Log.e(TAG, "dispose track error", e) }
         try { localVideoSource?.dispose() } catch (e: Exception) { Log.e(TAG, "dispose source error", e) }
         try { peerConnection?.close() } catch (e: Exception) { Log.e(TAG, "close pc error", e) }
@@ -320,6 +322,7 @@ class WebRTCManager(
         try { eglBase?.release() } catch (e: Exception) { Log.e(TAG, "release egl error", e) }
 
         videoCapturer = null
+        surfaceTextureHelper = null
         localVideoTrack = null
         localVideoSource = null
         peerConnection = null

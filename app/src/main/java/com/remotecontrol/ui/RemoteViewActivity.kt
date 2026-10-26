@@ -3,6 +3,7 @@ package com.remotecontrol.ui
 import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
@@ -10,6 +11,7 @@ import android.widget.EditText
 import androidx.appcompat.app.AppCompatActivity
 import com.google.gson.JsonObject
 import com.remotecontrol.databinding.ActivityRemoteViewBinding
+import com.remotecontrol.input.TouchGestureTracker
 import com.remotecontrol.network.SignalingClient
 import com.remotecontrol.network.WebRTCManager
 import org.webrtc.RendererCommon
@@ -33,10 +35,10 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
     private var roomId: String? = null
     private var isActive = true
 
-    // Touch gesture tracking
-    private var touchDownX = 0f
-    private var touchDownY = 0f
-    private var touchDownTime = 0L
+    private val gestureTracker = TouchGestureTracker()
+    private val longPressRunnable = Runnable {
+        if (isActive) gestureTracker.longPress(SystemClock.uptimeMillis())?.let(::sendGesture)
+    }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -96,52 +98,54 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
             val normX = (event.x / viewWidth).coerceIn(0f, 1f)
             val normY = (event.y / viewHeight).coerceIn(0f, 1f)
 
-            when (event.action) {
+            when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    touchDownX = normX
-                    touchDownY = normY
-                    touchDownTime = System.currentTimeMillis()
-                    // Show toolbar briefly on touch
+                    gestureTracker.down(normX, normY, event.eventTime)
+                    view.removeCallbacks(longPressRunnable)
+                    view.postDelayed(longPressRunnable, TouchGestureTracker.LONG_PRESS_MS)
                     showToolbar()
-                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    // Include batched samples so moving out and back cannot become a long press.
+                    for (i in 0 until event.historySize) {
+                        gestureTracker.move(
+                            (event.getHistoricalX(i) / viewWidth).coerceIn(0f, 1f),
+                            (event.getHistoricalY(i) / viewHeight).coerceIn(0f, 1f)
+                        )
+                    }
+                    gestureTracker.move(normX, normY)
                 }
                 MotionEvent.ACTION_UP -> {
-                    val elapsed = System.currentTimeMillis() - touchDownTime
-                    val dx = normX - touchDownX
-                    val dy = normY - touchDownY
-                    val distance = Math.sqrt((dx * dx + dy * dy).toDouble())
-
-                    if (distance < 0.02 && elapsed < 300) {
-                        // Tap
-                        sendInputEvent(JsonObject().apply {
-                            addProperty("action", "tap")
-                            addProperty("x", normX)
-                            addProperty("y", normY)
-                        })
-                    } else if (distance < 0.02 && elapsed >= 500) {
-                        // Long press
-                        sendInputEvent(JsonObject().apply {
-                            addProperty("action", "long_press")
-                            addProperty("x", normX)
-                            addProperty("y", normY)
-                            addProperty("duration", elapsed)
-                        })
-                    } else {
-                        // Swipe
-                        sendInputEvent(JsonObject().apply {
-                            addProperty("action", "swipe")
-                            addProperty("x", touchDownX)
-                            addProperty("y", touchDownY)
-                            addProperty("x2", normX)
-                            addProperty("y2", normY)
-                            addProperty("duration", elapsed.coerceIn(100, 1000))
-                        })
-                    }
-                    true
+                    view.removeCallbacks(longPressRunnable)
+                    gestureTracker.up(normX, normY, event.eventTime)?.let(::sendGesture)
                 }
-                else -> true
+                MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> cancelTouchGesture()
             }
+            true
         }
+    }
+
+    private fun sendGesture(gesture: TouchGestureTracker.Gesture) {
+        sendInputEvent(JsonObject().apply {
+            addProperty("action", gesture.action)
+            addProperty("x", gesture.x)
+            addProperty("y", gesture.y)
+            if (gesture.action == "swipe") {
+                addProperty("x2", gesture.x2)
+                addProperty("y2", gesture.y2)
+            }
+            if (gesture.duration > 0) addProperty("duration", gesture.duration)
+        })
+    }
+
+    private fun cancelTouchGesture() {
+        binding.touchOverlay.removeCallbacks(longPressRunnable)
+        gestureTracker.cancel()
+    }
+
+    override fun onPause() {
+        cancelTouchGesture()
+        super.onPause()
     }
 
     private fun setupToolbar() {
@@ -244,6 +248,7 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
 
     override fun onDestroy() {
         isActive = false
+        cancelTouchGesture()
         binding.toolbar.removeCallbacks(hideToolbarRunnable)
         try {
             binding.remoteVideoView.release()

@@ -24,6 +24,7 @@ import com.remotecontrol.R
 import com.remotecontrol.config.ServerConfig
 import com.remotecontrol.config.ServerConfigStore
 import com.remotecontrol.config.CaptureSettings
+import com.remotecontrol.config.CaptureAuthorizationRequests
 import com.remotecontrol.databinding.ActivityMainBinding
 import com.remotecontrol.databinding.DialogServerSettingsBinding
 import com.remotecontrol.network.SignalingClient
@@ -32,6 +33,7 @@ import com.remotecontrol.network.WebRTCManager
 import com.remotecontrol.service.ConnectionService
 import com.remotecontrol.service.InputInjectionService
 import com.remotecontrol.service.ScreenCaptureService
+import com.remotecontrol.service.RemoteScreenWakeController
 import com.remotecontrol.util.CoordinateMapper
 import org.webrtc.VideoTrack
 
@@ -39,7 +41,6 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val REQUEST_MEDIA_PROJECTION = 1001
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -51,9 +52,9 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
     private var currentRoomId: String? = null
     private var savedProjectionData: Intent? = null
-    private var captureAuthorizationPending = false
-    private var projectionRequestRoomId: String? = null
+    private val captureRequests = CaptureAuthorizationRequests()
     private var isDestroyed_ = false
+    private val remoteScreenWake by lazy { RemoteScreenWakeController(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -244,6 +245,7 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
     override fun onDisconnected() {
         if (isDestroyed_) return
+        cancelScreenCaptureRequest()
         InputInjectionService.instance?.cancelScreenConsent()
         if (currentRoomId != null) onRoomClosed()
         updateStatus(getString(R.string.status_disconnected), false)
@@ -291,13 +293,15 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     }
 
     override fun onRoomJoined(roomId: String) {
-        if (captureAuthorizationPending && projectionRequestRoomId != roomId) {
+        val pending = captureRequests.pending
+        if (pending != null && pending.roomId != roomId) {
             signalingClient.disconnectRoom(roomId)
             Toast.makeText(this, "请先完成或取消当前屏幕录制授权", Toast.LENGTH_LONG).show()
             return
         }
         currentRoomId = roomId
         updateStatus(getString(R.string.status_controlled), true)
+        remoteScreenWake.start()
         updateServiceNotification("被控制中，等待屏幕录制授权...")
 
         val projData = savedProjectionData
@@ -340,6 +344,9 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     }
 
     override fun onRoomClosed() {
+        InputInjectionService.instance?.clearPendingGestures()
+        cancelScreenCaptureRequest()
+        remoteScreenWake.stop()
         InputInjectionService.instance?.cancelScreenConsent()
         savedProjectionData = null
         try {
@@ -425,7 +432,8 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     // ========== Screen Capture ==========
 
     private fun requestScreenCapture() {
-        if (captureAuthorizationPending) return
+        if (captureRequests.pending != null) return
+        val roomId = currentRoomId ?: return
         try {
             val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val captureIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -433,18 +441,16 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
             } else {
                 projectionManager.createScreenCaptureIntent()
             }
-            captureAuthorizationPending = true
-            projectionRequestRoomId = currentRoomId
-            if (currentRoomId != null && CaptureSettings(this).autoConsentEnabled) {
+            val request = captureRequests.begin(roomId)
+            if (CaptureSettings(this).autoConsentEnabled) {
                 val inputService = InputInjectionService.instance
                 if (inputService != null) inputService.beginScreenConsent()
                 else Toast.makeText(this, R.string.auto_consent_unavailable, Toast.LENGTH_LONG).show()
             }
-            startActivityForResult(captureIntent, REQUEST_MEDIA_PROJECTION)
+            Log.d(TAG, "Requesting screen consent code=${request.code} room=$roomId")
+            startActivityForResult(captureIntent, request.code)
         } catch (e: Exception) {
-            InputInjectionService.instance?.cancelScreenConsent()
-            captureAuthorizationPending = false
-            projectionRequestRoomId = null
+            cancelScreenCaptureRequest()
             Log.e(TAG, "Failed to request screen capture", e)
             currentRoomId?.let {
                 signalingClient.disconnectRoom(it)
@@ -453,16 +459,28 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
         }
     }
 
+    private fun cancelScreenCaptureRequest() {
+        InputInjectionService.instance?.cancelScreenConsent()
+        val request = captureRequests.cancel() ?: return
+        Log.d(TAG, "Cancelling screen consent code=${request.code} room=${request.roomId}")
+        // Clear the pending request first: finishActivity may deliver a late result.
+        try {
+            finishActivity(request.code)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Unable to close cancelled screen consent dialog", e)
+        }
+    }
+
     @Deprecated("Use Activity Result API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_MEDIA_PROJECTION) {
+        val request = captureRequests.complete(requestCode)
+        if (request != null) {
             InputInjectionService.instance?.cancelScreenConsent()
-            captureAuthorizationPending = false
-            val requestedRoom = projectionRequestRoomId
-            projectionRequestRoomId = null
+            val requestedRoom = request.roomId
+            Log.d(TAG, "Screen consent result code=$requestCode room=$requestedRoom granted=${resultCode == Activity.RESULT_OK}")
             // Never use a late result for a cancelled or different remote session.
-            if (requestedRoom == null || currentRoomId != requestedRoom) return
+            if (currentRoomId != requestedRoom) return
             if (resultCode == Activity.RESULT_OK && data != null) {
                 savedProjectionData = data
                 onRoomJoined(requestedRoom)
@@ -479,6 +497,8 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     }
 
     override fun onDestroy() {
+        cancelScreenCaptureRequest()
+        remoteScreenWake.stop()
         InputInjectionService.instance?.cancelScreenConsent()
         isDestroyed_ = true
         // Don't disconnect — ConnectionService keeps it alive in background

@@ -79,6 +79,8 @@ sudo systemctl start coturn
 
 Android 14 及以上默认请求整个屏幕。启动 App 本身不再请求录屏，授权仅在收到远控请求时触发。请在实际被控设备上验证厂商系统兼容性。
 
+被控请求到达时会自动唤醒息屏的显示屏，并在会话期间保持亮屏；取消授权、断开会话或信令连接后释放屏幕唤醒锁，恢复正常待机。关闭电池优化只保证后台运行，不负责亮屏；此功能不绕过密码锁屏。
+
 ### 3. 编译 Android APK
 
 用 Android Studio 打开项目根目录:
@@ -179,3 +181,5 @@ remote-control/
 ├── build.gradle
 └── README.md
 ```
+
+优化说明与验证结果见 [手势优化](docs/plans/2026-10-26-gesture-latency-design.md) 和 [画面延迟优化](docs/plans/2026-10-26-video-latency-design.md)。
