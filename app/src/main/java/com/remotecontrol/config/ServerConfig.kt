@@ -11,7 +11,7 @@ data class ServerConfig(
 ) {
     companion object {
         val DEFAULT = ServerConfig(
-            signalingUrl = "ws://8.147.70.248:8080",
+            signalingUrl = "ws://47.94.172.185:8080",
             turnUrls = listOf("turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"),
             turnUsername = "openrelayproject",
             turnPassword = "openrelayproject"

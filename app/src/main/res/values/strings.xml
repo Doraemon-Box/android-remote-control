@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">LinkView</string>
-    <string name="accessibility_description">允许远程设备控制此手机的触摸和手势操作</string>
+    <string name="accessibility_description">允许远程设备控制此手机的触摸和手势操作；开启录屏自动授权后，辅助确认本 App 的系统录屏授权弹窗</string>
+    <string name="auto_consent_title">录屏自动授权</string>
+    <string name="auto_consent_description">开启后，收到远控请求时通过无障碍服务自动确认本 App 的整个屏幕录制授权。仅对可识别的系统弹窗生效，失败时请手动确认。</string>
+    <string name="auto_consent_accessibility_required">请先开启 LinkView 无障碍服务，再开启录屏自动授权</string>
+    <string name="auto_consent_manual">未能自动确认录屏授权，请在本机手动确认</string>
+    <string name="auto_consent_unavailable">无障碍服务未运行，请手动确认录屏授权</string>
     <string name="notification_channel">远程控制服务</string>
     <string name="notification_capturing">正在共享屏幕…</string>
     <string name="status_disconnected">未连接</string>

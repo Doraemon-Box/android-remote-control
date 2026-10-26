@@ -17,6 +17,7 @@ import com.google.gson.JsonObject
  * Supports: tap, swipe, long press, pinch, back, home, recents
  */
 class InputInjectionService : AccessibilityService() {
+    private var consentAssistant: ScreenConsentAssistant? = null
 
     companion object {
         private const val TAG = "InputInjection"
@@ -29,18 +30,26 @@ class InputInjectionService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        consentAssistant = ScreenConsentAssistant(this)
         Log.d(TAG, "Accessibility service connected")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Not used - we only need gesture dispatch
+        // ScreenConsentAssistant polls only during an explicitly armed local request.
     }
 
+    fun beginScreenConsent() { consentAssistant?.begin() }
+
+    fun cancelScreenConsent() { consentAssistant?.cancel() }
+
     override fun onInterrupt() {
+        cancelScreenConsent()
         Log.d(TAG, "Accessibility service interrupted")
     }
 
     override fun onDestroy() {
+        cancelScreenConsent()
+        consentAssistant = null
         super.onDestroy()
         instance = null
         Log.d(TAG, "Accessibility service destroyed")

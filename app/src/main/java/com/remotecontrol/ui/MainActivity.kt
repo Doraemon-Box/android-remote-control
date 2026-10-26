@@ -23,6 +23,7 @@ import com.remotecontrol.App
 import com.remotecontrol.R
 import com.remotecontrol.config.ServerConfig
 import com.remotecontrol.config.ServerConfigStore
+import com.remotecontrol.config.CaptureSettings
 import com.remotecontrol.databinding.ActivityMainBinding
 import com.remotecontrol.databinding.DialogServerSettingsBinding
 import com.remotecontrol.network.SignalingClient
@@ -51,6 +52,7 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     private var currentRoomId: String? = null
     private var savedProjectionData: Intent? = null
     private var captureAuthorizationPending = false
+    private var projectionRequestRoomId: String? = null
     private var isDestroyed_ = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,6 +80,7 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
         setupDeviceList()
         setupSetupGuide()
+        setupAutoConsent()
         binding.btnServerSettings.setOnClickListener { showServerSettings() }
 
         // Start keep-alive foreground service
@@ -101,12 +104,7 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
         } else savedConfig.signalingUrl
         signalingClient.connect(activeServerUrl, "${Build.MANUFACTURER} ${Build.MODEL}")
 
-        // Auto-request screen capture on Android 13 and below
-        // Android 14+ (Honor 400 Pro) crashes if we start mediaProjection service too early
-        // Honor 10 (Android 10) + ADB appops allow = silent auto-grant, no popup
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.TIRAMISU) {
-            requestScreenCapture()
-        }
+        // Request projection only when a remote session needs it.
     }
 
     override fun onResume() {
@@ -121,6 +119,21 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
         }
         binding.rvDevices.layoutManager = LinearLayoutManager(this)
         binding.rvDevices.adapter = deviceAdapter
+    }
+
+    private fun setupAutoConsent() {
+        val settings = CaptureSettings(this)
+        binding.switchAutoConsent.isChecked = settings.autoConsentEnabled
+        binding.switchAutoConsent.setOnCheckedChangeListener { button, checked ->
+            if (checked && !InputInjectionService.isRunning()) {
+                button.isChecked = false
+                Toast.makeText(this, R.string.auto_consent_accessibility_required, Toast.LENGTH_LONG).show()
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            } else {
+                settings.autoConsentEnabled = checked
+                if (!checked) InputInjectionService.instance?.cancelScreenConsent()
+            }
+        }
     }
 
     private fun showServerSettings() {
@@ -231,6 +244,8 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
     override fun onDisconnected() {
         if (isDestroyed_) return
+        InputInjectionService.instance?.cancelScreenConsent()
+        if (currentRoomId != null) onRoomClosed()
         updateStatus(getString(R.string.status_disconnected), false)
         deviceAdapter.updateDevices(emptyList())
         updateDeviceCount(0)
@@ -276,9 +291,14 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     }
 
     override fun onRoomJoined(roomId: String) {
+        if (captureAuthorizationPending && projectionRequestRoomId != roomId) {
+            signalingClient.disconnectRoom(roomId)
+            Toast.makeText(this, "请先完成或取消当前屏幕录制授权", Toast.LENGTH_LONG).show()
+            return
+        }
         currentRoomId = roomId
         updateStatus(getString(R.string.status_controlled), true)
-        updateServiceNotification("被控制中，屏幕共享中...")
+        updateServiceNotification("被控制中，等待屏幕录制授权...")
 
         val projData = savedProjectionData
         if (projData != null) {
@@ -300,14 +320,18 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
                     if (isDestroyed_ || currentRoomId != roomId) return@postDelayed
                     try {
                         webRTCManager.startAsControlled(roomId, projData)
+                        updateServiceNotification("被控制中，屏幕共享中...")
                     } catch (e: Exception) {
                         Log.e(TAG, "WebRTC start failed", e)
                         signalingClient.disconnectRoom(roomId)
+                        onRoomClosed()
                         Toast.makeText(this, "屏幕采集失败，请重新连接并授权", Toast.LENGTH_LONG).show()
                     }
                 }, 300)
             } catch (e: Exception) {
                 Log.e(TAG, "Screen capture failed", e)
+                signalingClient.disconnectRoom(roomId)
+                onRoomClosed()
                 Toast.makeText(this, "屏幕采集失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
         } else {
@@ -316,6 +340,8 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     }
 
     override fun onRoomClosed() {
+        InputInjectionService.instance?.cancelScreenConsent()
+        savedProjectionData = null
         try {
             webRTCManager.release()
         } catch (e: Exception) {
@@ -325,6 +351,7 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
         webRTCManager.initialize()
         RemoteControlHolder.webRTCManager = webRTCManager
         currentRoomId = null
+        stopService(Intent(this, ScreenCaptureService::class.java))
         updateStatus(getString(R.string.status_connected), true)
         Toast.makeText(this, "远程会话已结束", Toast.LENGTH_SHORT).show()
         updateServiceNotification("待机中，等待连接...")
@@ -407,11 +434,22 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
                 projectionManager.createScreenCaptureIntent()
             }
             captureAuthorizationPending = true
+            projectionRequestRoomId = currentRoomId
+            if (currentRoomId != null && CaptureSettings(this).autoConsentEnabled) {
+                val inputService = InputInjectionService.instance
+                if (inputService != null) inputService.beginScreenConsent()
+                else Toast.makeText(this, R.string.auto_consent_unavailable, Toast.LENGTH_LONG).show()
+            }
             startActivityForResult(captureIntent, REQUEST_MEDIA_PROJECTION)
         } catch (e: Exception) {
+            InputInjectionService.instance?.cancelScreenConsent()
             captureAuthorizationPending = false
+            projectionRequestRoomId = null
             Log.e(TAG, "Failed to request screen capture", e)
-            currentRoomId?.let { signalingClient.disconnectRoom(it) }
+            currentRoomId?.let {
+                signalingClient.disconnectRoom(it)
+                onRoomClosed()
+            }
         }
     }
 
@@ -419,25 +457,29 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_MEDIA_PROJECTION) {
+            InputInjectionService.instance?.cancelScreenConsent()
             captureAuthorizationPending = false
+            val requestedRoom = projectionRequestRoomId
+            projectionRequestRoomId = null
+            // Never use a late result for a cancelled or different remote session.
+            if (requestedRoom == null || currentRoomId != requestedRoom) return
             if (resultCode == Activity.RESULT_OK && data != null) {
                 savedProjectionData = data
-                val roomId = currentRoomId
-                if (roomId != null) {
-                    onRoomJoined(roomId)
-                } else {
-                    Toast.makeText(this, "屏幕录制已授权，待机中", Toast.LENGTH_SHORT).show()
-                }
+                onRoomJoined(requestedRoom)
                 checkSetupNeeded()
             } else {
                 savedProjectionData = null
-                currentRoomId?.let { signalingClient.disconnectRoom(it) }
+                currentRoomId?.let {
+                    signalingClient.disconnectRoom(it)
+                    onRoomClosed()
+                }
                 Toast.makeText(this, "未授权屏幕录制，远程会话已取消", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
     override fun onDestroy() {
+        InputInjectionService.instance?.cancelScreenConsent()
         isDestroyed_ = true
         // Don't disconnect — ConnectionService keeps it alive in background
         // Only disconnect if user explicitly stops the service
