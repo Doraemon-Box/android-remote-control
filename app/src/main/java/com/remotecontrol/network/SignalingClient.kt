@@ -35,8 +35,10 @@ class SignalingClient(
     private var deviceName: String? = null
     private var reconnectAttempt = 0
     private var intentionalDisconnect = false
+    private var connectionGeneration = 0
 
     fun connect(serverUrl: String, deviceName: String) {
+        mainHandler.removeCallbacksAndMessages(null)
         this.serverUrl = serverUrl
         this.deviceName = deviceName
         this.intentionalDisconnect = false
@@ -45,6 +47,9 @@ class SignalingClient(
     }
 
     private fun doConnect(serverUrl: String, deviceName: String) {
+        val generation = ++connectionGeneration
+        isConnected = false
+        deviceId = null
         // Close existing connection first
         webSocket?.close(1000, null)
         webSocket = null
@@ -52,19 +57,22 @@ class SignalingClient(
         val request = Request.Builder().url(serverUrl).build()
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                isConnected = true
-                reconnectAttempt = 0
-                val msg = JsonObject().apply {
-                    addProperty("type", "register")
-                    addProperty("deviceName", deviceName)
+                mainHandler.post {
+                    if (generation != connectionGeneration || intentionalDisconnect) return@post
+                    isConnected = true
+                    reconnectAttempt = 0
+                    val msg = JsonObject().apply {
+                        addProperty("type", "register")
+                        addProperty("deviceName", deviceName)
+                    }
+                    webSocket.send(gson.toJson(msg))
+                    listener.onConnected()
                 }
-                webSocket.send(gson.toJson(msg))
-                mainHandler.post { listener.onConnected() }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
-                    handleMessage(text)
+                    handleMessage(text, generation)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error handling message: ${e.message}", e)
                 }
@@ -75,8 +83,10 @@ class SignalingClient(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                isConnected = false
                 mainHandler.post {
+                    if (generation != connectionGeneration || intentionalDisconnect) return@post
+                    isConnected = false
+                    deviceId = null
                     listener.onDisconnected()
                     scheduleReconnect()
                 }
@@ -84,8 +94,10 @@ class SignalingClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "WebSocket failure: ${t.message}", t)
-                isConnected = false
                 mainHandler.post {
+                    if (generation != connectionGeneration || intentionalDisconnect) return@post
+                    isConnected = false
+                    deviceId = null
                     listener.onDisconnected()
                     scheduleReconnect()
                 }
@@ -97,24 +109,26 @@ class SignalingClient(
         if (intentionalDisconnect) return
         val url = serverUrl ?: return
         val name = deviceName ?: return
+        val generation = connectionGeneration
 
         reconnectAttempt++
         val delay = (RECONNECT_DELAY_MS * reconnectAttempt).coerceAtMost(MAX_RECONNECT_DELAY_MS)
         Log.d(TAG, "Scheduling reconnect in ${delay}ms (attempt $reconnectAttempt)")
 
         mainHandler.postDelayed({
-            if (!isConnected && !intentionalDisconnect) {
+            if (generation == connectionGeneration && !isConnected && !intentionalDisconnect) {
                 Log.d(TAG, "Reconnecting...")
                 doConnect(url, name)
             }
         }, delay)
     }
 
-    private fun handleMessage(text: String) {
+    private fun handleMessage(text: String, generation: Int) {
         val msg = gson.fromJson(text, JsonObject::class.java)
         val type = msg.get("type")?.asString ?: return
 
         mainHandler.post {
+            if (generation != connectionGeneration || intentionalDisconnect) return@post
             when (type) {
                 "registered" -> {
                     deviceId = msg.get("deviceId")?.asString
@@ -213,11 +227,13 @@ class SignalingClient(
     }
 
     fun disconnect() {
+        connectionGeneration++
         intentionalDisconnect = true
         mainHandler.removeCallbacksAndMessages(null)
         webSocket?.close(1000, "User disconnect")
         webSocket = null
         isConnected = false
+        deviceId = null
     }
 
     private fun send(msg: JsonObject) {

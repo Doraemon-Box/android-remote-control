@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.media.projection.MediaProjectionConfig
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -17,9 +18,13 @@ import androidx.core.app.NotificationCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.remotecontrol.App
 import com.remotecontrol.R
+import com.remotecontrol.config.ServerConfig
+import com.remotecontrol.config.ServerConfigStore
 import com.remotecontrol.databinding.ActivityMainBinding
+import com.remotecontrol.databinding.DialogServerSettingsBinding
 import com.remotecontrol.network.SignalingClient
 import com.remotecontrol.network.SignalingListener
 import com.remotecontrol.network.WebRTCManager
@@ -33,7 +38,6 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val SERVER_URL = "ws://8.147.70.248:8080"
         private const val REQUEST_MEDIA_PROJECTION = 1001
     }
 
@@ -41,9 +45,12 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     private lateinit var signalingClient: SignalingClient
     private lateinit var webRTCManager: WebRTCManager
     private lateinit var deviceAdapter: DeviceAdapter
+    private lateinit var serverConfigStore: ServerConfigStore
+    private lateinit var activeServerUrl: String
 
     private var currentRoomId: String? = null
     private var savedProjectionData: Intent? = null
+    private var captureAuthorizationPending = false
     private var isDestroyed_ = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -60,6 +67,7 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        serverConfigStore = ServerConfigStore(this)
 
         signalingClient = SignalingClient(this)
         webRTCManager = WebRTCManager(this, signalingClient, this)
@@ -70,6 +78,7 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
         setupDeviceList()
         setupSetupGuide()
+        binding.btnServerSettings.setOnClickListener { showServerSettings() }
 
         // Start keep-alive foreground service
         try {
@@ -85,7 +94,12 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
         // Auto-connect
         updateStatus(getString(R.string.status_connecting), false)
-        signalingClient.connect(SERVER_URL, "${Build.MANUFACTURER} ${Build.MODEL}")
+        val isDebuggable = applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0
+        val savedConfig = serverConfigStore.load()
+        activeServerUrl = if (isDebuggable && !serverConfigStore.hasSavedConfig()) {
+            intent.getStringExtra("server_url") ?: savedConfig.signalingUrl
+        } else savedConfig.signalingUrl
+        signalingClient.connect(activeServerUrl, "${Build.MANUFACTURER} ${Build.MODEL}")
 
         // Auto-request screen capture on Android 13 and below
         // Android 14+ (Honor 400 Pro) crashes if we start mediaProjection service too early
@@ -107,6 +121,57 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
         }
         binding.rvDevices.layoutManager = LinearLayoutManager(this)
         binding.rvDevices.adapter = deviceAdapter
+    }
+
+    private fun showServerSettings() {
+        if (currentRoomId != null) {
+            Toast.makeText(this, R.string.server_settings_in_session, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val form = DialogServerSettingsBinding.inflate(layoutInflater)
+        val config = serverConfigStore.load()
+        form.etSignalingUrl.setText(activeServerUrl)
+        form.etTurnUrls.setText(config.turnUrls.joinToString("\n"))
+        form.etTurnUsername.setText(config.turnUsername)
+        form.etTurnPassword.setText(config.turnPassword)
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.server_settings)
+            .setView(form.root)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.save_settings, null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val signalingUrl = form.etSignalingUrl.text.toString().trim()
+                val turnUrls = form.etTurnUrls.text.toString().lineSequence()
+                    .map { it.trim() }.filter { it.isNotEmpty() }.distinct().toList()
+                form.signalingUrlLayout.error = if (ServerConfig.isValidSignalingUrl(signalingUrl))
+                    null else getString(R.string.invalid_signaling_url)
+                form.turnUrlsLayout.error = if (turnUrls.all { ServerConfig.isValidTurnUrl(it) })
+                    null else getString(R.string.invalid_turn_url)
+                if (form.signalingUrlLayout.error != null || form.turnUrlsLayout.error != null) return@setOnClickListener
+                if (currentRoomId != null) {
+                    Toast.makeText(this, R.string.server_settings_in_session, Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                val updated = ServerConfig(signalingUrl, turnUrls,
+                    form.etTurnUsername.text.toString(), form.etTurnPassword.text.toString())
+                if (!serverConfigStore.save(updated)) {
+                    Toast.makeText(this, R.string.settings_save_failed, Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                intent.removeExtra("server_url")
+                if (activeServerUrl != signalingUrl) {
+                    activeServerUrl = signalingUrl
+                    onDisconnected()
+                    updateStatus(getString(R.string.status_connecting), false)
+                    signalingClient.connect(signalingUrl, "${Build.MANUFACTURER} ${Build.MODEL}")
+                }
+                Toast.makeText(this, R.string.settings_saved, Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
     }
 
     private fun setupSetupGuide() {
@@ -217,6 +282,8 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
         val projData = savedProjectionData
         if (projData != null) {
+            // Android 14+ projection consent is single-use.
+            savedProjectionData = null
             try {
                 // Start screen capture foreground service NOW (with valid token)
                 val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
@@ -230,10 +297,13 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
                 }
                 // Small delay to let service start, then begin WebRTC
                 binding.root.postDelayed({
+                    if (isDestroyed_ || currentRoomId != roomId) return@postDelayed
                     try {
                         webRTCManager.startAsControlled(roomId, projData)
                     } catch (e: Exception) {
                         Log.e(TAG, "WebRTC start failed", e)
+                        signalingClient.disconnectRoom(roomId)
+                        Toast.makeText(this, "屏幕采集失败，请重新连接并授权", Toast.LENGTH_LONG).show()
                     }
                 }, 300)
             } catch (e: Exception) {
@@ -241,8 +311,6 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
                 Toast.makeText(this, "屏幕采集失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
         } else {
-            // No token yet — need to request (first time only)
-            Toast.makeText(this, "请先授权屏幕录制", Toast.LENGTH_LONG).show()
             requestScreenCapture()
         }
     }
@@ -330,23 +398,42 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     // ========== Screen Capture ==========
 
     private fun requestScreenCapture() {
+        if (captureAuthorizationPending) return
         try {
             val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_MEDIA_PROJECTION)
+            val captureIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                projectionManager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+            } else {
+                projectionManager.createScreenCaptureIntent()
+            }
+            captureAuthorizationPending = true
+            startActivityForResult(captureIntent, REQUEST_MEDIA_PROJECTION)
         } catch (e: Exception) {
+            captureAuthorizationPending = false
             Log.e(TAG, "Failed to request screen capture", e)
+            currentRoomId?.let { signalingClient.disconnectRoom(it) }
         }
     }
 
     @Deprecated("Use Activity Result API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_MEDIA_PROJECTION && resultCode == Activity.RESULT_OK && data != null) {
-            // Just save the token, don't start service yet
-            // Service will be started when actually being controlled (onRoomJoined)
-            savedProjectionData = data
-            Toast.makeText(this, "屏幕录制已授权，待机中", Toast.LENGTH_SHORT).show()
-            checkSetupNeeded()
+        if (requestCode == REQUEST_MEDIA_PROJECTION) {
+            captureAuthorizationPending = false
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                savedProjectionData = data
+                val roomId = currentRoomId
+                if (roomId != null) {
+                    onRoomJoined(roomId)
+                } else {
+                    Toast.makeText(this, "屏幕录制已授权，待机中", Toast.LENGTH_SHORT).show()
+                }
+                checkSetupNeeded()
+            } else {
+                savedProjectionData = null
+                currentRoomId?.let { signalingClient.disconnectRoom(it) }
+                Toast.makeText(this, "未授权屏幕录制，远程会话已取消", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 

@@ -42,6 +42,16 @@
                 android:textColor="#999999"
                 android:textSize="13sp"
                 android:background="@drawable/bg_status_pill" />
+
+            <ImageButton
+                android:id="@+id/btnServerSettings"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@android:drawable/ic_menu_preferences"
+                app:tint="#555555"
+                android:contentDescription="@string/server_settings" />
         </LinearLayout>
     </LinearLayout>
 

@@ -7,6 +7,7 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import com.google.gson.JsonObject
+import com.remotecontrol.config.ServerConfigStore
 import org.webrtc.*
 
 /**
@@ -32,18 +33,6 @@ class WebRTCManager(
         private const val CAPTURE_FPS = 30
         private const val RESOLUTION_SCALE = 0.75
 
-        private val ICE_SERVERS = listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("turn:openrelay.metered.ca:80")
-                .setUsername("openrelayproject")
-                .setPassword("openrelayproject")
-                .createIceServer(),
-            PeerConnection.IceServer.builder("turn:openrelay.metered.ca:443")
-                .setUsername("openrelayproject")
-                .setPassword("openrelayproject")
-                .createIceServer(),
-        )
     }
 
     private var peerConnectionFactory: PeerConnectionFactory? = null
@@ -255,7 +244,18 @@ class WebRTCManager(
     }
 
     private fun createPeerConnection(remoteVideoSink: VideoSink? = null) {
-        val rtcConfig = PeerConnection.RTCConfiguration(ICE_SERVERS).apply {
+        val config = ServerConfigStore(context).load()
+        val iceServers = mutableListOf(
+            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+            PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer()
+        )
+        config.turnUrls.forEach { url ->
+            iceServers.add(PeerConnection.IceServer.builder(url)
+                .setUsername(config.turnUsername)
+                .setPassword(config.turnPassword)
+                .createIceServer())
+        }
+        val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
             // Optimize for low latency

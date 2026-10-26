@@ -13,4 +13,17 @@
     <string name="enable_accessibility">请先开启无障碍服务</string>
     <string name="online_devices">在线设备 %d</string>
     <string name="no_devices">没有在线设备</string>
+    <string name="server_settings">服务器设置</string>
+    <string name="server_settings_description">配置保存在本机，重启 App 后仍然有效。信令地址修改后自动重连；TURN 配置在下次远程连接时生效。</string>
+    <string name="signaling_server_url">信令服务器地址（ws:// 或 wss://）</string>
+    <string name="turn_server_urls">TURN 服务器地址</string>
+    <string name="turn_server_hint">每行一个，如 turn:example.com:3478 或 turns:example.com:5349?transport=tcp；留空则不使用 TURN 中继。</string>
+    <string name="turn_username">TURN 用户名</string>
+    <string name="turn_password">TURN 密码</string>
+    <string name="save_settings">保存</string>
+    <string name="invalid_signaling_url">请输入有效的 ws:// 或 wss:// 地址及端口（1–65535）</string>
+    <string name="invalid_turn_url">请输入有效的 turn: 或 turns: 地址，每行一个；可选 ?transport=udp 或 ?transport=tcp</string>
+    <string name="server_settings_in_session">请先结束当前远程会话，再修改服务器配置</string>
+    <string name="settings_save_failed">保存失败，请重试</string>
+    <string name="settings_saved">配置已保存，重启 App 后仍然有效</string>
 </resources>
