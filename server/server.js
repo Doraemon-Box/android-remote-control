@@ -97,7 +97,9 @@ function sendTo(deviceId, message) {
 function broadcastDeviceList() {
   const list = [];
   for (const [id, dev] of devices.entries()) {
-    list.push({ deviceId: id, deviceName: dev.deviceName });
+    if (dev.ws.readyState === WebSocket.OPEN) {
+      list.push({ deviceId: id, deviceName: dev.deviceName });
+    }
   }
   const msg = JSON.stringify({ type: 'device_list', devices: list });
   for (const [, dev] of devices.entries()) {
@@ -107,7 +109,9 @@ function broadcastDeviceList() {
   }
 }
 
-function cleanupDevice(deviceId) {
+function cleanupDevice(deviceId, socket) {
+  // A late close/error from a replaced socket must not remove its replacement.
+  if (devices.get(deviceId)?.ws !== socket) return;
   // Clean up rooms
   for (const [roomId, room] of rooms.entries()) {
     if (room.controller === deviceId || room.controlled === deviceId) {
@@ -122,6 +126,8 @@ function cleanupDevice(deviceId) {
 
 wss.on('connection', (ws) => {
   let currentDeviceId = null;
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (data) => {
     let msg;
@@ -132,9 +138,22 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type !== 'register' && devices.get(currentDeviceId)?.ws !== ws) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Device not registered' }));
+      return;
+    }
     switch (msg.type) {
       case 'register': {
-        const deviceId = msg.deviceId || uuidv4();
+        // Repeated register on one socket is idempotent, even for legacy clients.
+        const deviceId = currentDeviceId ||
+          (typeof msg.deviceId === 'string' && msg.deviceId.length <= 128 && msg.deviceId
+            ? msg.deviceId : uuidv4());
+        const previous = devices.get(deviceId);
+        if (previous && previous.ws !== ws) {
+          cleanupDevice(deviceId, previous.ws);
+          previous.ws.terminate();
+        }
         currentDeviceId = deviceId;
         devices.set(deviceId, {
           ws,
@@ -182,7 +201,7 @@ wss.on('connection', (ws) => {
       case 'answer':
       case 'ice_candidate': {
         const room = rooms.get(msg.roomId);
-        if (!room) {
+        if (!room || (room.controller !== currentDeviceId && room.controlled !== currentDeviceId)) {
           ws.send(JSON.stringify({ type: 'error', message: 'Room not found' }));
           return;
         }
@@ -214,7 +233,7 @@ wss.on('connection', (ws) => {
 
       case 'disconnect_room': {
         const room3 = rooms.get(msg.roomId);
-        if (room3) {
+        if (room3 && (room3.controller === currentDeviceId || room3.controlled === currentDeviceId)) {
           const otherId = room3.controller === currentDeviceId
             ? room3.controlled
             : room3.controller;
@@ -238,20 +257,37 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     if (currentDeviceId) {
       console.log(`Device disconnected: ${currentDeviceId}`);
-      cleanupDevice(currentDeviceId);
+      cleanupDevice(currentDeviceId, ws);
     }
   });
 
   ws.on('error', (err) => {
     console.error(`WebSocket error: ${err.message}`);
     if (currentDeviceId) {
-      cleanupDevice(currentDeviceId);
+      cleanupDevice(currentDeviceId, ws);
     }
   });
 });
 
+// Remove half-open sockets left by Wi-Fi/mobile switching or a killed process.
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (!ws.isAlive) {
+      for (const [id, device] of devices) {
+        if (device.ws === ws) cleanupDevice(id, ws);
+      }
+      ws.terminate();
+      continue;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, 15000);
+heartbeat.unref();
+wss.on('close', () => clearInterval(heartbeat));
+
 httpServer.listen(PORT, () => {
-  console.log(`Server running on http://0.0.0.0:${PORT}`);
+  console.log(`Server running on http://0.0.0.0:${httpServer.address().port}`);
   console.log(`APK download: http://0.0.0.0:${PORT}/my.apk`);
   console.log(`WebSocket signaling: ws://0.0.0.0:${PORT}`);
 });

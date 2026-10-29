@@ -1,0 +1,15 @@
+<resources>
+    <string name="nav_home">主页</string>
+    <string name="nav_settings">设置</string>
+    <string name="device_permissions">设备权限与后台运行</string>
+    <string name="confirm_connection_title">连接设备</string>
+    <string name="confirm_connection_message">确定要远程控制“%1$s”吗？</string>
+    <string name="confirm_connection">连接</string>
+    <string name="device_no_longer_online">设备已离线，请刷新后重试</string>
+    <string name="permission_change_title">权限变更确认</string>
+    <string name="confirm_disable_permission">确认关闭</string>
+    <string name="continue_to_settings">继续前往</string>
+    <string name="disable_auto_consent_message">关闭录屏自动授权后，每次远程控制可能需要在被控设备上手动确认录屏授权。确定关闭吗？</string>
+    <string name="manage_accessibility_message">无障碍服务当前已开启。关闭后将无法远程执行点击、滑动和自动确认录屏授权。确定前往系统设置管理此权限吗？</string>
+    <string name="manage_battery_message">后台运行权限当前已开启。恢复电池优化后，系统可能限制后台运行，导致设备离线。确定前往系统设置管理此权限吗？</string>
+</resources>

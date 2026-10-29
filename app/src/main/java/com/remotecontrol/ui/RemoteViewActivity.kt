@@ -60,6 +60,10 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
             return
         }
 
+        // The manager is created by MainActivity, but controller callbacks belong
+        // to this screen while the remote session is visible.
+        webRTCManager?.setListener(this)
+
         // Initialize video renderer
         try {
             val eglBase = webRTCManager?.getEglBase()
@@ -255,6 +259,7 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
         } catch (e: Exception) {
             Log.e(TAG, "Error releasing video view", e)
         }
+        RemoteControlHolder.mainListener?.let { webRTCManager?.setListener(it) }
         super.onDestroy()
     }
 }
@@ -265,4 +270,5 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
 object RemoteControlHolder {
     var signalingClient: SignalingClient? = null
     var webRTCManager: WebRTCManager? = null
+    var mainListener: WebRTCManager.WebRTCListener? = null
 }

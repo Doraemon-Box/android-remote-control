@@ -1,14 +1,17 @@
 package com.remotecontrol.network
 
 import android.os.Handler
+import android.content.Context
 import android.os.Looper
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import okhttp3.*
 import java.util.concurrent.TimeUnit
+import java.util.UUID
 
 class SignalingClient(
+    context: Context,
     private val listener: SignalingListener
 ) {
     companion object {
@@ -36,6 +39,13 @@ class SignalingClient(
     private var reconnectAttempt = 0
     private var intentionalDisconnect = false
     private var connectionGeneration = 0
+    // App-private random identity, stable across reconnects and process restarts.
+    private val registrationId = context.applicationContext
+        .getSharedPreferences("signaling_identity", Context.MODE_PRIVATE).let { prefs ->
+            prefs.getString("device_id", null) ?: UUID.randomUUID().toString().also {
+                check(prefs.edit().putString("device_id", it).commit())
+            }
+        }
 
     fun connect(serverUrl: String, deviceName: String) {
         mainHandler.removeCallbacksAndMessages(null)
@@ -51,7 +61,7 @@ class SignalingClient(
         isConnected = false
         deviceId = null
         // Close existing connection first
-        webSocket?.close(1000, null)
+        webSocket?.cancel()
         webSocket = null
 
         val request = Request.Builder().url(serverUrl).build()
@@ -64,6 +74,7 @@ class SignalingClient(
                     val msg = JsonObject().apply {
                         addProperty("type", "register")
                         addProperty("deviceName", deviceName)
+                        addProperty("deviceId", registrationId)
                     }
                     webSocket.send(gson.toJson(msg))
                     listener.onConnected()
@@ -230,7 +241,7 @@ class SignalingClient(
         connectionGeneration++
         intentionalDisconnect = true
         mainHandler.removeCallbacksAndMessages(null)
-        webSocket?.close(1000, "User disconnect")
+        webSocket?.cancel()
         webSocket = null
         isConnected = false
         deviceId = null

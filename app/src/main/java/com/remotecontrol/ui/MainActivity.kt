@@ -51,6 +51,9 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     private lateinit var activeServerUrl: String
 
     private var currentRoomId: String? = null
+    private var onlineDeviceIds = emptySet<String>()
+    private var connectionDialog: androidx.appcompat.app.AlertDialog? = null
+    private var permissionDialog: androidx.appcompat.app.AlertDialog? = null
     private var savedProjectionData: Intent? = null
     private val captureRequests = CaptureAuthorizationRequests()
     private var isDestroyed_ = false
@@ -72,16 +75,27 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
         setContentView(binding.root)
         serverConfigStore = ServerConfigStore(this)
 
-        signalingClient = SignalingClient(this)
+        RemoteControlHolder.signalingClient?.disconnect()
+        RemoteControlHolder.webRTCManager?.release()
+        signalingClient = SignalingClient(this, this)
         webRTCManager = WebRTCManager(this, signalingClient, this)
         webRTCManager.initialize()
 
         RemoteControlHolder.signalingClient = signalingClient
         RemoteControlHolder.webRTCManager = webRTCManager
+        RemoteControlHolder.mainListener = this
 
         setupDeviceList()
         setupSetupGuide()
         setupAutoConsent()
+        binding.bottomNavigation.setOnItemSelectedListener { item ->
+            val home = item.itemId == R.id.navigation_home
+            binding.pageHome.visibility = if (home) View.VISIBLE else View.GONE
+            binding.pageSettings.visibility = if (home) View.GONE else View.VISIBLE
+            true
+        }
+        binding.bottomNavigation.selectedItemId = savedInstanceState?.getInt("selected_page")
+            ?: R.id.navigation_home
         binding.btnServerSettings.setOnClickListener { showServerSettings() }
 
         // Start keep-alive foreground service
@@ -115,8 +129,20 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
     private fun setupDeviceList() {
         deviceAdapter = DeviceAdapter { device ->
-            Toast.makeText(this, "正在连接 ${device.deviceName}…", Toast.LENGTH_SHORT).show()
-            signalingClient.connectTo(device.deviceId)
+            if (connectionDialog?.isShowing != true) {
+                connectionDialog = MaterialAlertDialogBuilder(this)
+                    .setTitle(R.string.confirm_connection_title)
+                    .setMessage(getString(R.string.confirm_connection_message, device.deviceName))
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(R.string.confirm_connection) { _, _ ->
+                        if (signalingClient.isConnected && device.deviceId in onlineDeviceIds) {
+                            Toast.makeText(this, "正在连接 ${device.deviceName}…", Toast.LENGTH_SHORT).show()
+                            signalingClient.connectTo(device.deviceId)
+                        } else {
+                            Toast.makeText(this, R.string.device_no_longer_online, Toast.LENGTH_SHORT).show()
+                        }
+                    }.show()
+            }
         }
         binding.rvDevices.layoutManager = LinearLayoutManager(this)
         binding.rvDevices.adapter = deviceAdapter
@@ -125,16 +151,33 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
     private fun setupAutoConsent() {
         val settings = CaptureSettings(this)
         binding.switchAutoConsent.isChecked = settings.autoConsentEnabled
-        binding.switchAutoConsent.setOnCheckedChangeListener { button, checked ->
+        binding.switchAutoConsent.setOnClickListener {
+            val checked = binding.switchAutoConsent.isChecked
             if (checked && !InputInjectionService.isRunning()) {
-                button.isChecked = false
+                binding.switchAutoConsent.isChecked = false
                 Toast.makeText(this, R.string.auto_consent_accessibility_required, Toast.LENGTH_LONG).show()
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            } else if (!checked) {
+                binding.switchAutoConsent.isChecked = settings.autoConsentEnabled
+                confirmPermissionChange(R.string.disable_auto_consent_message, R.string.confirm_disable_permission) {
+                    settings.autoConsentEnabled = false
+                    binding.switchAutoConsent.isChecked = false
+                    InputInjectionService.instance?.cancelScreenConsent()
+                }
             } else {
-                settings.autoConsentEnabled = checked
-                if (!checked) InputInjectionService.instance?.cancelScreenConsent()
+                settings.autoConsentEnabled = true
             }
         }
+    }
+
+    private fun confirmPermissionChange(message: Int, action: Int, onConfirmed: () -> Unit) {
+        if (permissionDialog?.isShowing == true) return
+        permissionDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.permission_change_title)
+            .setMessage(message)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(action) { _, _ -> onConfirmed() }
+            .show()
     }
 
     private fun showServerSettings() {
@@ -190,14 +233,27 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
     private fun setupSetupGuide() {
         binding.btnSetupAccessibility.setOnClickListener {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            if (InputInjectionService.isRunning()) {
+                confirmPermissionChange(R.string.manage_accessibility_message, R.string.continue_to_settings) {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }
+            } else {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
         }
         binding.btnSetupBattery.setOnClickListener {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                    data = Uri.parse("package:$packageName")
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                if (pm.isIgnoringBatteryOptimizations(packageName)) {
+                    confirmPermissionChange(R.string.manage_battery_message, R.string.continue_to_settings) {
+                        startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                    }
+                } else {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
                 }
-                startActivity(intent)
             }
         }
     }
@@ -213,12 +269,14 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
             binding.cardSetup.visibility = View.VISIBLE
             binding.btnSetupAccessibility.text = if (accessibilityOk)
                 "1. 无障碍服务 已开启 ✓" else "1. 开启无障碍服务（被控端必须）"
-            binding.btnSetupAccessibility.isEnabled = !accessibilityOk
+            binding.btnSetupAccessibility.isEnabled = true
             binding.btnSetupBattery.text = if (batteryOk)
                 "2. 电池优化 已关闭 ✓" else "2. 关闭电池优化（保持后台运行）"
-            binding.btnSetupBattery.isEnabled = !batteryOk
+            binding.btnSetupBattery.isEnabled = true
         } else {
-            binding.cardSetup.visibility = View.GONE
+            binding.cardSetup.visibility = View.VISIBLE
+            binding.btnSetupAccessibility.text = "无障碍服务 已开启 ✓"
+            binding.btnSetupBattery.text = "电池优化 已关闭 ✓"
         }
     }
 
@@ -245,6 +303,8 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
 
     override fun onDisconnected() {
         if (isDestroyed_) return
+        onlineDeviceIds = emptySet()
+        connectionDialog?.dismiss()
         cancelScreenCaptureRequest()
         InputInjectionService.instance?.cancelScreenConsent()
         if (currentRoomId != null) onRoomClosed()
@@ -270,6 +330,7 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
                 list.add(DeviceInfo(id, name))
             }
         }
+        onlineDeviceIds = list.map { it.deviceId }.toSet()
         deviceAdapter.updateDevices(list)
         updateDeviceCount(list.size)
         if (list.isEmpty()) {
@@ -357,6 +418,7 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
         webRTCManager = WebRTCManager(this, signalingClient, this)
         webRTCManager.initialize()
         RemoteControlHolder.webRTCManager = webRTCManager
+        RemoteControlHolder.mainListener = this
         currentRoomId = null
         stopService(Intent(this, ScreenCaptureService::class.java))
         updateStatus(getString(R.string.status_connected), true)
@@ -496,13 +558,26 @@ class MainActivity : AppCompatActivity(), SignalingListener, WebRTCManager.WebRT
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt("selected_page", binding.bottomNavigation.selectedItemId)
+        super.onSaveInstanceState(outState)
+    }
+
     override fun onDestroy() {
+        connectionDialog?.dismiss()
+        permissionDialog?.dismiss()
         cancelScreenCaptureRequest()
         remoteScreenWake.stop()
         InputInjectionService.instance?.cancelScreenConsent()
         isDestroyed_ = true
-        // Don't disconnect — ConnectionService keeps it alive in background
-        // Only disconnect if user explicitly stops the service
+        // A destroyed Activity must not retain its listener or reconnect forever.
+        // Merely backgrounding the Activity does not call onDestroy.
+        signalingClient.disconnect()
+        webRTCManager.release()
+        if (RemoteControlHolder.signalingClient === signalingClient) {
+            RemoteControlHolder.signalingClient = null
+            RemoteControlHolder.webRTCManager = null
+        }
         super.onDestroy()
     }
 }

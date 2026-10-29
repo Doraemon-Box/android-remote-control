@@ -20,7 +20,7 @@ import org.webrtc.*
 class WebRTCManager(
     private val context: Context,
     private val signalingClient: SignalingClient,
-    private val listener: WebRTCListener
+    private var listener: WebRTCListener
 ) {
     companion object {
         private const val TAG = "WebRTCManager"
@@ -55,6 +55,10 @@ class WebRTCManager(
             .setVideoEncoderFactory(encoderFactory)
             .setVideoDecoderFactory(decoderFactory)
             .createPeerConnectionFactory()
+    }
+
+    fun setListener(listener: WebRTCListener) {
+        this.listener = listener
     }
 
     fun getEglBase(): EglBase? = eglBase
@@ -176,7 +180,15 @@ class WebRTCManager(
         val sdpMLineIndex = data.get("sdpMLineIndex")?.asInt ?: return
         val candidateStr = data.get("candidate")?.asString ?: return
         val candidate = IceCandidate(sdpMid, sdpMLineIndex, candidateStr)
-        peerConnection?.addIceCandidate(candidate)
+        val added = peerConnection?.addIceCandidate(candidate)
+        Log.d(TAG, "Remote ICE ${candidateSummary(candidate)} accepted=$added")
+    }
+
+    private fun candidateSummary(candidate: IceCandidate): String {
+        val parts = candidate.sdp.split(" ")
+        val typeIndex = parts.indexOf("typ")
+        val type = if (typeIndex >= 0) parts.getOrNull(typeIndex + 1) else "unknown"
+        return "protocol=${parts.getOrNull(2)} type=$type"
     }
 
     /**
@@ -246,6 +258,7 @@ class WebRTCManager(
 
     private fun createPeerConnection(remoteVideoSink: VideoSink? = null) {
         val config = ServerConfigStore(context).load()
+        Log.d(TAG, "Creating peer controller=$isController room=$roomId TURN URLs=${config.turnUrls}")
         val iceServers = mutableListOf(
             PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
             PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer()
@@ -269,6 +282,7 @@ class WebRTCManager(
             rtcConfig,
             object : PeerConnection.Observer {
                 override fun onIceCandidate(candidate: IceCandidate) {
+                    Log.d(TAG, "Local ICE ${candidateSummary(candidate)}")
                     val candidateJson = JsonObject().apply {
                         addProperty("sdpMid", candidate.sdpMid)
                         addProperty("sdpMLineIndex", candidate.sdpMLineIndex)
@@ -300,7 +314,12 @@ class WebRTCManager(
 
                 override fun onSignalingChange(state: PeerConnection.SignalingState) {}
                 override fun onIceConnectionReceivingChange(receiving: Boolean) {}
-                override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {}
+                override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {
+                    Log.d(TAG, "ICE gathering state: $state")
+                }
+                override fun onIceCandidateError(event: IceCandidateErrorEvent) {
+                    Log.w(TAG, "ICE server error url=${event.url} code=${event.errorCode} text=${event.errorText}")
+                }
                 override fun onIceCandidatesRemoved(candidates: Array<IceCandidate>) {}
                 override fun onAddStream(stream: MediaStream) {}
                 override fun onRemoveStream(stream: MediaStream) {}

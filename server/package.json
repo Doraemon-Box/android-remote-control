@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node registration.test.js",
     "dev": "node server.js"
   },
   "dependencies": {
