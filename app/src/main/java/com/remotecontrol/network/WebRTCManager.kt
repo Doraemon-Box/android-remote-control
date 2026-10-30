@@ -10,6 +10,7 @@ import com.google.gson.JsonObject
 import com.remotecontrol.config.ServerConfigStore
 import com.remotecontrol.config.VideoStreamProfile
 import org.webrtc.*
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Manages WebRTC peer connections for screen sharing.
@@ -36,6 +37,7 @@ class WebRTCManager(
     private var eglBase: EglBase? = null
     private var roomId: String? = null
     private var isController = false
+    private val hasLoggedRemoteFrame = AtomicBoolean(false)
 
     fun initialize() {
         eglBase = EglBase.create()
@@ -96,7 +98,7 @@ class WebRTCManager(
         // Adapt the source before starting, so excess display frames never reach the encoder.
         localVideoSource!!.adaptOutputFormat(size.width, size.height, VideoStreamProfile.FPS)
         screenCapturer.startCapture(size.width, size.height, VideoStreamProfile.FPS)
-        Log.d(TAG, "Capture configured: ${size.width}x${size.height}, source cap=${VideoStreamProfile.FPS}fps")
+        Log.d(TAG, "Capture configured: display=${width}x${height}, stream=${size.width}x${size.height}, source cap=${VideoStreamProfile.FPS}fps")
 
         localVideoTrack = peerConnectionFactory!!.createVideoTrack("screen_track", localVideoSource)
         localVideoTrack?.setEnabled(true)
@@ -294,7 +296,12 @@ class WebRTCManager(
                 override fun onTrack(transceiver: RtpTransceiver) {
                     val track = transceiver.receiver.track()
                     if (track is VideoTrack && remoteVideoSink != null) {
-                        track.addSink(remoteVideoSink)
+                        track.addSink { frame ->
+                            if (hasLoggedRemoteFrame.compareAndSet(false, true)) {
+                                Log.d(TAG, "First remote frame: ${frame.rotatedWidth}x${frame.rotatedHeight}, rotation=${frame.rotation}")
+                            }
+                            remoteVideoSink.onFrame(frame)
+                        }
                         listener.onRemoteVideoTrackReceived(track)
                     }
                 }

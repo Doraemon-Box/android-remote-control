@@ -8,7 +8,11 @@ import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import android.widget.EditText
+import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.google.gson.JsonObject
 import com.remotecontrol.databinding.ActivityRemoteViewBinding
 import com.remotecontrol.input.TouchGestureTracker
@@ -25,6 +29,7 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
 
     companion object {
         private const val TAG = "RemoteViewActivity"
+        private const val REMOTE_CONTENT_SCALE = 0.9f
         const val EXTRA_ROOM_ID = "room_id"
         const val EXTRA_IS_CONTROLLER = "is_controller"
     }
@@ -43,8 +48,20 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        hideNavigationBar()
         binding = ActivityRemoteViewBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        binding.root.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+            val width = (view.width * REMOTE_CONTENT_SCALE).toInt()
+            val height = (view.height * REMOTE_CONTENT_SCALE).toInt()
+            val params = binding.remoteContent.layoutParams as FrameLayout.LayoutParams
+            if (params.width != width || params.height != height) {
+                params.width = width
+                params.height = height
+                binding.remoteContent.layoutParams = params
+            }
+        }
 
         roomId = intent.getStringExtra(EXTRA_ROOM_ID)
         if (roomId == null) {
@@ -70,7 +87,7 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
             if (eglBase != null) {
                 binding.remoteVideoView.init(eglBase.eglBaseContext, null)
                 binding.remoteVideoView.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
-                binding.remoteVideoView.setEnableHardwareScaler(true)
+                binding.remoteVideoView.setEnableHardwareScaler(false)
                 binding.remoteVideoView.setMirror(false)
             } else {
                 Log.e(TAG, "EglBase is null, cannot init video view")
@@ -88,6 +105,34 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
 
         setupTouchOverlay()
         setupToolbar()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideNavigationBar()
+    }
+
+    private fun hideNavigationBar() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            )
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -247,6 +292,12 @@ class RemoteViewActivity : AppCompatActivity(), WebRTCManager.WebRTCListener {
     override fun onRemoteVideoTrackReceived(track: VideoTrack) {
         runOnUiThread {
             binding.tvConnectionInfo.text = "正在接收画面"
+            binding.remoteVideoView.post {
+                Log.d(
+                    TAG,
+                    "Video renderer bounds: ${binding.remoteVideoView.width}x${binding.remoteVideoView.height}, touch bounds: ${binding.touchOverlay.width}x${binding.touchOverlay.height}"
+                )
+            }
         }
     }
 
